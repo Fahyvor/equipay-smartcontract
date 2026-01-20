@@ -1,59 +1,160 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-/// @title Equipay
-/// @notice Accepts AVAX and auto-splits to stakeholders on payment
+/// @title EquipayEscrow
+/// @notice Trustless P2P escrow with platform fees
 contract Equipay {
     address public owner;
-    address[] public payees;
-    uint256[] public shares;
+    address public platformWallet;
+
+    uint256 public platformFeeBps;
+    uint256 public constant MAX_BPS = 10_000;
+
+    enum EscrowState {
+        AWAITING_PAYMENT,
+        FUNDED,
+        RELEASED,
+        REFUNDED,
+        DISPUTED
+    }
+
+    struct Escrow {
+        address buyer;
+        address seller;
+        uint256 amount;
+        EscrowState state;
+    }
+
+    uint256 public escrowCount;
+    mapping(uint256 => Escrow) public escrows;
+
+    /* ========== ERRORS ========== */
+    error NotOwner();
+    error NotBuyer();
+    error InvalidState();
+    error InvalidAmount();
+
+    /* ========== EVENTS ========== */
+    event EscrowCreated(uint256 indexed escrowId, address buyer, address seller);
+    event EscrowFunded(uint256 indexed escrowId, uint256 amount);
+    event EscrowReleased(uint256 indexed escrowId, uint256 sellerAmount, uint256 platformFee);
+    event EscrowRefunded(uint256 indexed escrowId);
+    event EscrowDisputed(uint256 indexed escrowId);
 
     modifier onlyOwner() {
-        require(msg.sender == owner, "Not owner");
+        _onlyOwner();
+        _;
+    }
+    function _onlyOwner() internal view {
+        if (msg.sender != owner) revert NotOwner();
+    }
+
+    modifier onlyBuyer(uint256 escrowId) {
+        _onlyBuyer(escrowId);
         _;
     }
 
-    constructor(address[] memory _payees, uint256[] memory _shares) {
-        require(_payees.length == _shares.length, "Mismatch in payees and shares");
-        uint256 totalShares;
+    function _onlyBuyer(uint256 escrowId) internal view {
+        if (msg.sender != escrows[escrowId].buyer) revert NotBuyer();
+    }
 
-        for (uint256 i = 0; i < _shares.length; i++) {
-            totalShares += _shares[i];
-        }
 
-        require(totalShares == 100, "Shares must sum to 100");
+    constructor(address _platformWallet, uint256 _platformFeeBps) {
+        require(_platformWallet != address(0), "Invalid platform wallet");
+        require(_platformFeeBps <= 1000, "Fee too high");
+
         owner = msg.sender;
-        payees = _payees;
-        shares = _shares;
+        platformWallet = _platformWallet;
+        platformFeeBps = _platformFeeBps;
     }
 
-    receive() external payable {
-        split();
+
+    /* ========== ESCROW FLOW ========== */
+
+    function createEscrow(address seller) external returns (uint256) {
+        require(seller != address(0), "Invalid seller");
+
+        escrowCount++;
+
+        escrows[escrowCount] = Escrow({
+            buyer: msg.sender,
+            seller: seller,
+            amount: 0,
+            state: EscrowState.AWAITING_PAYMENT
+        });
+
+        emit EscrowCreated(escrowCount, msg.sender, seller);
+        return escrowCount;
     }
 
-    function split() public payable {
-        require(msg.value > 0, "No payment");
-        uint256 total = msg.value;
+    function fundEscrow(uint256 escrowId) external payable onlyBuyer(escrowId) {
+        Escrow storage e = escrows[escrowId];
 
-        for (uint256 i = 0; i < payees.length; i++) {
-            uint256 amount = (total * shares[i]) / 100;
-            payable(payees[i]).transfer(amount);
+        if (e.state != EscrowState.AWAITING_PAYMENT) revert InvalidState();
+        if (msg.value == 0) revert InvalidAmount();
+
+        e.amount = msg.value;
+        e.state = EscrowState.FUNDED;
+
+        emit EscrowFunded(escrowId, msg.value);
+    }
+
+    function releaseFunds(uint256 escrowId) external onlyBuyer(escrowId) {
+        Escrow storage e = escrows[escrowId];
+        if (e.state != EscrowState.FUNDED) revert InvalidState();
+
+        uint256 platformFee = (e.amount * platformFeeBps) / MAX_BPS;
+        uint256 sellerAmount = e.amount - platformFee;
+
+        e.state = EscrowState.RELEASED;
+
+        (bool success, ) = payable(platformWallet).call{value: platformFee}("");
+        require(success, "Platform fee transfer failed");
+        (bool sellerSuccess, ) = payable(e.seller).call{value: sellerAmount}("");
+        require(sellerSuccess, "Seller transfer failed");
+
+        emit EscrowReleased(escrowId, sellerAmount, platformFee);
+    }
+
+    function dispute(uint256 escrowId) external onlyBuyer(escrowId) {
+        Escrow storage e = escrows[escrowId];
+        if (e.state != EscrowState.FUNDED) revert InvalidState();
+
+        e.state = EscrowState.DISPUTED;
+        emit EscrowDisputed(escrowId);
+    }
+
+    function resolveDispute(uint256 escrowId, bool releaseToSeller) external onlyOwner {
+        Escrow storage e = escrows[escrowId];
+        if (e.state != EscrowState.DISPUTED) revert InvalidState();
+
+        if (releaseToSeller) {
+            uint256 platformFee = (e.amount * platformFeeBps) / MAX_BPS;
+            uint256 sellerAmount = e.amount - platformFee;
+
+            (bool success, ) = payable(platformWallet).call{value: platformFee}("");
+            require(success, "Platform fee transfer failed");
+            (bool sellerSuccess, ) = payable(e.seller).call{value: sellerAmount}("");
+            require(sellerSuccess, "Seller transfer failed");
+
+            e.state = EscrowState.RELEASED;
+            emit EscrowReleased(escrowId, sellerAmount, platformFee);
+        } else {
+            (bool buyerSuccess, ) = payable(e.buyer).call{value: e.amount}("");
+            require(buyerSuccess, "Buyer refund transfer failed");
+            e.state = EscrowState.REFUNDED;
+            emit EscrowRefunded(escrowId);
         }
     }
 
-    function updateShares(address[] memory _newPayees, uint256[] memory _newShares) external onlyOwner {
-        require(_newPayees.length == _newShares.length, "Mismatch");
-        uint256 total;
-        for (uint256 i = 0; i < _newShares.length; i++) {
-            total += _newShares[i];
-        }
-        require(total == 100, "Shares must sum to 100");
-
-        payees = _newPayees;
-        shares = _newShares;
+    /* ========== ADMIN ========== */
+    function updatePlatformFee(uint256 newFeeBps) external onlyOwner {
+        require(newFeeBps <= 1000, "Fee too high");
+        platformFeeBps = newFeeBps;
     }
 
-    function getPayees() external view returns (address[] memory, uint256[] memory) {
-        return (payees, shares);
+    function updatePlatformWallet(address newWallet) external onlyOwner {
+        require(newWallet != address(0), "Invalid wallet");
+        platformWallet = newWallet;
     }
 }
