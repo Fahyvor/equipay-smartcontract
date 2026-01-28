@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: UNLICENSED
-pragma solidity ^0.8.13;
+pragma solidity ^0.8.20;
 
 import { Test } from "forge-std/Test.sol";
 import { Equipay } from "../src/Equipay.sol";
-import { console } from "forge-std/console.sol";
+// import { console } from "forge-std/console.sol";
 
 contract EquipayTest is Test {
     Equipay public equipay;

@@ -40,6 +40,8 @@ contract Equipay {
     event EscrowReleased(uint256 indexed escrowId, uint256 sellerAmount, uint256 platformFee);
     event EscrowRefunded(uint256 indexed escrowId);
     event EscrowDisputed(uint256 indexed escrowId);
+    event PlatformFeeBpsUpdated(uint256 oldFeeBps, uint256 newFeeBps);
+    event PlatformWalletUpdated(address oldWallet, address newWallet);
 
     modifier onlyOwner() {
         _onlyOwner();
@@ -103,17 +105,17 @@ contract Equipay {
         Escrow storage e = escrows[escrowId];
         if (e.state != EscrowState.FUNDED) revert InvalidState();
 
+        e.state = EscrowState.RELEASED;
         uint256 platformFee = (e.amount * platformFeeBps) / MAX_BPS;
         uint256 sellerAmount = e.amount - platformFee;
 
-        e.state = EscrowState.RELEASED;
 
+        emit EscrowReleased(escrowId, sellerAmount, platformFee);
         (bool success, ) = payable(platformWallet).call{value: platformFee}("");
         require(success, "Platform fee transfer failed");
         (bool sellerSuccess, ) = payable(e.seller).call{value: sellerAmount}("");
         require(sellerSuccess, "Seller transfer failed");
 
-        emit EscrowReleased(escrowId, sellerAmount, platformFee);
     }
 
     function dispute(uint256 escrowId) external onlyBuyer(escrowId) {
@@ -128,33 +130,38 @@ contract Equipay {
         Escrow storage e = escrows[escrowId];
         if (e.state != EscrowState.DISPUTED) revert InvalidState();
 
+        uint256 amount = e.amount;
+        e.amount = 0;
+
         if (releaseToSeller) {
-            uint256 platformFee = (e.amount * platformFeeBps) / MAX_BPS;
-            uint256 sellerAmount = e.amount - platformFee;
+            e.state = EscrowState.RELEASED;
+            uint256 platformFee = (amount * platformFeeBps) / MAX_BPS;
+            uint256 sellerAmount = amount - platformFee;
+
+            emit EscrowReleased(escrowId, sellerAmount, platformFee);
 
             (bool success, ) = payable(platformWallet).call{value: platformFee}("");
             require(success, "Platform fee transfer failed");
             (bool sellerSuccess, ) = payable(e.seller).call{value: sellerAmount}("");
             require(sellerSuccess, "Seller transfer failed");
-
-            e.state = EscrowState.RELEASED;
-            emit EscrowReleased(escrowId, sellerAmount, platformFee);
         } else {
-            (bool buyerSuccess, ) = payable(e.buyer).call{value: e.amount}("");
-            require(buyerSuccess, "Buyer refund transfer failed");
             e.state = EscrowState.REFUNDED;
             emit EscrowRefunded(escrowId);
+            (bool buyerSuccess, ) = payable(e.buyer).call{value: amount}("");
+            require(buyerSuccess, "Buyer refund transfer failed");
         }
     }
 
     /* ========== ADMIN ========== */
     function updatePlatformFee(uint256 newFeeBps) external onlyOwner {
         require(newFeeBps <= 1000, "Fee too high");
+        emit PlatformFeeBpsUpdated(platformFeeBps, newFeeBps);
         platformFeeBps = newFeeBps;
     }
 
     function updatePlatformWallet(address newWallet) external onlyOwner {
         require(newWallet != address(0), "Invalid wallet");
+        emit PlatformWalletUpdated(platformWallet, newWallet);
         platformWallet = newWallet;
     }
 }
