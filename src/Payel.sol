@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-/// @title EquipayEscrow
+/// @title PayelEscrow
 /// @notice Trustless P2P escrow with platform fees
-contract Equipay {
+contract Payel {
     address public owner;
     address public platformWallet;
 
